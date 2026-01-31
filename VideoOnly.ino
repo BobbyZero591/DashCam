@@ -1,0 +1,271 @@
+/*
+ Example guide:
+ https://ameba-doc-arduino-sdk.readthedocs-hosted.com/en/latest/ameba_pro2/amb82-mini/Example_Guides/Multimedia/MP4%20Recording.html
+*/
+#include <SPI.h>
+#include <stdio.h>
+#include <time.h>
+#include "rtc.h"
+#include "Wire.h"
+#include "inttypes.h"
+
+#include "AmebaFatFS.h"
+#include "StreamIO.h"
+#include "VideoStream.h"
+#include "MP4Recording.h"
+
+#define CHANNEL 0
+#define USE_H264  1
+
+#ifdef USE_H264
+// Default preset configurations for each video channel:
+// Channel 0 : 1920 x 1080 30FPS H264
+// Channel 1 : 1280 x 720  30FPS H264
+VideoSetting config(CHANNEL);
+#else
+// Alternate channel config for 1920x1080 30FPS and H265 compression
+VideoSetting config(1920, 1080, 30, VIDEO_HEVC, 0);
+#endif
+
+MP4Recording mp4;
+StreamIO videoStreamer(1, 1);    // 1 Input Video -> 1 Output RTSP
+AmebaFatFS  fileSystem;
+
+#define DS3231_I2C_ADDRESS 0x68
+
+const uint32_t  maxDuration =  900; // Maximum duration of a recording file
+const int       maxFileCount = 100; // Maximum number of files (total recording time in hours = (maxDuration x maxFileCount) / 3600)
+
+// long long currentTime = 0;
+uint64_t seconds;
+
+// Convert binary coded decimal to normal decimal numbers
+byte bcdToDec(byte val)
+{
+  return( (val/16*10) + (val%16) );
+}
+
+bool getNextVideoFileName(char* fileName)
+{
+  int   index;
+  char  buffer[20];
+  
+  for (index = 1; index <= maxFileCount; index++)
+  {
+    sprintf(buffer, "%s%03d.mp4", fileSystem.getRootPath(), index);
+    sprintf(fileName, "%03d", index);
+
+    // Check if the video file exists for that name
+    if (!fileSystem.exists(buffer))
+    {
+      // return the video file name if it doesn't yet exist
+
+      Serial.print("returning fileName: ");
+      Serial.println(buffer);
+      return true;
+    }
+  }
+
+  uint16_t  second, minute, hour, dayOfWeek, dayOfMonth, month, year;
+  uint64_t  oldestFileTime = INT64_MAX;
+  uint64_t  fileModTime;
+  char      oldestFileName[128];
+
+  // Didn't find an unused file name, so find the oldest file and delete it...
+  for (index = 1; index <= maxFileCount; index++)
+  {
+    sprintf(buffer, "%s%03d.mp4", fileSystem.getRootPath(), index);
+    sprintf(fileName, "%03d", index);
+
+    fileSystem.getLastModTime(buffer, &year, &month, &dayOfMonth, &hour, &minute, &second);
+
+    fileModTime = rtc.SetEpoch(year, month, dayOfMonth, hour, minute, second);
+
+    if (fileModTime < oldestFileTime)
+    {
+      printf("%s is an older file \n", buffer);
+      oldestFileTime = fileModTime;
+      strcpy(oldestFileName, fileName);        
+    }
+  }
+
+  if (strlen(oldestFileName))
+  {
+    strcpy(fileName, oldestFileName);
+    printf("returning oldest fileName: %s \n", fileName);
+
+    return true;
+  }
+
+  Serial.print("Failed to find Video File Name");
+  return false;
+}
+
+void setup()
+{
+  // Initialize the hardware
+    Serial.begin(115200);    
+    rtc.Init();
+    Wire.begin();
+    fileSystem.begin();
+
+    setRTCTime();
+
+    // Configure camera video channel with video format information
+    Camera.configVideoChannel(CHANNEL, config);
+    Camera.videoInit();
+
+    // Configure MP4 with identical video format information
+    // Configure MP4 recording settings
+    mp4.configVideo(config);
+    mp4.setRecordingDuration(maxDuration);
+    mp4.setRecordingDataType(STORAGE_VIDEO);    // Set MP4 to record video only
+
+    // Configure StreamIO object to stream data from video channel to MP4 recording
+    videoStreamer.registerInput(Camera.getStream(CHANNEL));
+    videoStreamer.registerOutput(mp4);
+    
+    if (videoStreamer.begin() != 0) 
+    {
+        Serial.println("StreamIO link start failed");
+    }
+
+    // Start data stream from video channel
+    Camera.channelBegin(CHANNEL);
+    
+    delay(1000);
+}
+
+void loop()
+{
+  static uint8_t   setModified = 0;
+  static uint64_t  videoStartTime;
+  static uint16_t  minutes = 0;
+  uint16_t         temp;
+  static String  oldFileName;
+  char fileName[128]; // Maximum file name lenght allowed by file system
+  uint16_t year, month, date, hour, minute, second;
+  char  buffer[200];
+
+  // Check if a video is currently being recorded.
+  if (mp4.getRecordingState() == false)
+  {
+    oldFileName = mp4.getRecordingFileName();
+    setModified = 1;
+        
+    if (getNextVideoFileName(&fileName[0]))
+    {
+      Serial.print("Starting recording video file: ");
+      Serial.println(fileName);
+      
+      mp4.setRecordingFileName(fileName);
+      mp4.begin();
+
+      videoStartTime = rtc.Read();
+      minutes = 0;
+    }    
+  }
+  else
+  {
+      seconds = rtc.Read();
+
+      // Wait a few seconds before setting the time stamp on the old video
+      if (setModified && ((seconds - videoStartTime) > 5) )
+      {
+        setTimeStamp(oldFileName.c_str());
+        setModified = 0;        
+      }
+      
+      temp = (seconds - videoStartTime) / 60;
+
+      if (temp >= 1 && temp > minutes)
+      {
+        minutes = temp;
+        Serial.print("Recording length = ");
+        Serial.print(minutes, DEC);
+        Serial.println(" minutes.");
+      }
+  }
+}
+
+void setTimeStamp(const char* fileName)
+{
+  char fullFileName[127];
+  byte second, minute, hour, dayOfWeek, dayOfMonth, month, year;
+  int   result;
+  
+  if (*fileName != 0)
+  {
+    sprintf(fullFileName, "%s%s.mp4", fileSystem.getRootPath(), fileName);
+
+    if (fileSystem.exists(fullFileName))
+    {
+      Serial.print("Setting timestamp on file: ");
+      Serial.println(fullFileName);
+  
+      // retrieve data from DS3231
+      readDS3231time(&second, &minute, &hour, &dayOfWeek, &dayOfMonth, &month, &year);
+  
+      printf("Time stamp:  %04d/%02d/%02d, %02d:%02d:%02d \n", year+2000, month, dayOfMonth, hour, minute, second);
+      
+      result = fileSystem.setLastModTime(fullFileName, (uint16_t)year + 2000, month, dayOfMonth, hour, minute, second);
+  
+      if ( result !=  0)
+      {
+        printf("setLastModTime returned result: %d \n", result);
+      }
+    }
+  }
+}
+
+void setRTCTime()
+{
+  byte second, minute, hour, dayOfWeek, dayOfMonth, month, year = 0;
+
+  // retrieve data from DS3231
+  while (year == 0)
+  {
+    readDS3231time(&second, &minute, &hour, &dayOfWeek, &dayOfMonth, &month, &year);
+
+    if (year == 0)
+    {
+      delay(100);
+    }      
+  }
+
+  long long epochTime = rtc.SetEpoch(year + 2000, month, dayOfMonth, hour, minute, second);
+  rtc.Write(epochTime);
+}
+
+void readDS3231time(byte *second,
+                    byte *minute,
+                    byte *hour,
+                    byte *dayOfWeek,
+                    byte *dayOfMonth,
+                    byte *month,
+                    byte *year)
+{
+  Wire.beginTransmission(DS3231_I2C_ADDRESS);
+  Wire.write(0); // set DS3231 register pointer to 00h
+  Wire.endTransmission();
+  Wire.requestFrom(DS3231_I2C_ADDRESS, 7);
+  // request seven bytes of data from DS3231 starting from register 00h
+  *second = bcdToDec(Wire.read() & 0x7f);
+  *minute = bcdToDec(Wire.read());
+  *hour = bcdToDec(Wire.read() & 0x3f);
+  *dayOfWeek = bcdToDec(Wire.read());
+  *dayOfMonth = bcdToDec(Wire.read());
+  *month = bcdToDec(Wire.read());
+  *year = bcdToDec(Wire.read());
+}
+
+
+void printInfo(void)
+{
+    Serial.println("------------------------------");
+    Serial.println("- Summary of Streaming -");
+    Serial.println("------------------------------");
+    Camera.printInfo();
+    Serial.println("- MP4 Recording Information -");
+    mp4.printInfo();
+}

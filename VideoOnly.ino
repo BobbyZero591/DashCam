@@ -14,6 +14,9 @@
 #include "VideoStream.h"
 #include "MP4Recording.h"
 
+bool getNextVideoFileName(char* fileName);
+void loop();
+
 #define CHANNEL 0
 #define USE_H264  1
 
@@ -45,68 +48,13 @@ byte bcdToDec(byte val)
   return( (val/16*10) + (val%16) );
 }
 
-bool getNextVideoFileName(char* fileName)
-{
-  int   index;
-  char  buffer[20];
-  
-  for (index = 1; index <= maxFileCount; index++)
-  {
-    sprintf(buffer, "%s%03d.mp4", fileSystem.getRootPath(), index);
-    sprintf(fileName, "%03d", index);
-
-    // Check if the video file exists for that name
-    if (!fileSystem.exists(buffer))
-    {
-      // return the video file name if it doesn't yet exist
-
-      Serial.print("returning fileName: ");
-      Serial.println(buffer);
-      return true;
-    }
-  }
-
-  uint16_t  second, minute, hour, dayOfWeek, dayOfMonth, month, year;
-  uint64_t  oldestFileTime = INT64_MAX;
-  uint64_t  fileModTime;
-  char      oldestFileName[128];
-
-  // Didn't find an unused file name, so find the oldest file and delete it...
-  for (index = 1; index <= maxFileCount; index++)
-  {
-    sprintf(buffer, "%s%03d.mp4", fileSystem.getRootPath(), index);
-    sprintf(fileName, "%03d", index);
-
-    fileSystem.getLastModTime(buffer, &year, &month, &dayOfMonth, &hour, &minute, &second);
-
-    fileModTime = rtc.SetEpoch(year, month, dayOfMonth, hour, minute, second);
-
-    if (fileModTime < oldestFileTime)
-    {
-      printf("%s is an older file \n", buffer);
-      oldestFileTime = fileModTime;
-      strcpy(oldestFileName, fileName);        
-    }
-  }
-
-  if (strlen(oldestFileName))
-  {
-    strcpy(fileName, oldestFileName);
-    printf("returning oldest fileName: %s \n", fileName);
-
-    return true;
-  }
-
-  Serial.print("Failed to find Video File Name");
-  return false;
-}
-
 void setup()
 {
   // Initialize the hardware
     Serial.begin(115200);    
     rtc.Init();
     Wire.begin();
+    
     fileSystem.begin();
 
     setRTCTime();
@@ -132,8 +80,89 @@ void setup()
 
     // Start data stream from video channel
     Camera.channelBegin(CHANNEL);
+
+    pinMode(LED_G, OUTPUT);    
+}
+
+void generateCurrentFileName(char* fileName)
+{
+  byte second, minute, hour, dayOfWeek, dayOfMonth, month, year;
+
+  readDS3231time(&second, &minute, &hour, &dayOfWeek, &dayOfMonth, &month, &year);
+
+  sprintf(fileName, "%02d%02d%02d-%02d%02d%02d", year, month, dayOfMonth, hour, minute, second);
+}
+
+bool getNextVideoFileName(char* fileName)
+{
+  char    nameBuffer[2000];
+  char    buffer[128];
+  int     index;
+  char*   temp;
+  String  nameStr;
+  int     fileCount = 0;
+
+  // Generate file name in YYMMDD-HHMM format and return
+  generateCurrentFileName(fileName);
+
+  fileSystem.readDir(fileSystem.getRootPath(), nameBuffer, sizeof(nameBuffer));
+
+  for (temp = nameBuffer; strlen(temp) > 0; temp += strlen(temp) + 1)
+  {
+    nameStr = temp;
+    nameStr.toLowerCase();
     
-    delay(1000);
+    if(nameStr.endsWith(".mp4"))
+    {
+      fileCount++;
+    }
+  }
+
+  printf("Found %d mp4 files\n", fileCount);
+
+  if (fileCount < maxFileCount)
+  {
+    // Just return because we don't have to remove the oldest file...
+    return 1;
+  }
+
+  // Find the oldest file and delete it
+
+  uint16_t  second, minute, hour, day, month, year;  
+  uint64_t  oldestFileTime = INT64_MAX;
+  uint64_t  fileModTime;
+  String    oldestFileName;
+
+  for (temp = nameBuffer; strlen(temp) > 0; temp += strlen(temp) + 1)
+  {
+    sprintf(buffer, "%s%s", fileSystem.getRootPath(), temp);
+    
+    fileSystem.getLastModTime(buffer, &year, &month, &day, &hour, &minute, &second);
+
+    fileModTime = rtc.SetEpoch(year, month, day, hour, minute, second);
+
+    if (fileModTime < oldestFileTime)
+    {
+      oldestFileTime = fileModTime;
+      oldestFileName = temp;
+    }
+  }
+
+  printf("%s is the oldest file\n", oldestFileName.c_str());
+
+  if(oldestFileName.length() && fileSystem.exists(oldestFileName))
+  {
+    printf("Removing oldest file \n");
+
+    fileSystem.remove(oldestFileName);
+
+    printf("Returning %s as new video file name \n", fileName);
+
+    return true;
+  }
+
+  Serial.println("Failed to find Video File Name");
+  return false;
 }
 
 void loop()
@@ -142,10 +171,13 @@ void loop()
   static uint64_t  videoStartTime;
   static uint16_t  minutes = 0;
   uint16_t         temp;
-  static String  oldFileName;
+  static String    oldFileName;
   char fileName[128]; // Maximum file name lenght allowed by file system
   uint16_t year, month, date, hour, minute, second;
-  char  buffer[200];
+
+  seconds = rtc.Read();
+
+  digitalWrite(LED_G, (seconds & 0x01));
 
   // Check if a video is currently being recorded.
   if (mp4.getRecordingState() == false)
@@ -161,14 +193,12 @@ void loop()
       mp4.setRecordingFileName(fileName);
       mp4.begin();
 
-      videoStartTime = rtc.Read();
+      videoStartTime = seconds;
       minutes = 0;
     }    
   }
   else
   {
-      seconds = rtc.Read();
-
       // Wait a few seconds before setting the time stamp on the old video
       if (setModified && ((seconds - videoStartTime) > 5) )
       {

@@ -1,7 +1,3 @@
-/*
- Example guide:
- https://ameba-doc-arduino-sdk.readthedocs-hosted.com/en/latest/ameba_pro2/amb82-mini/Example_Guides/Multimedia/MP4%20Recording.html
-*/
 #include <SPI.h>
 #include <stdio.h>
 #include <time.h>
@@ -36,7 +32,7 @@ AmebaFatFS  fileSystem;
 
 #define DS3231_I2C_ADDRESS 0x68
 
-const uint32_t  maxDuration =  900; // Maximum duration of a recording file
+const uint32_t  maxDuration =  120; // Maximum duration of a recording file
 const int       maxFileCount = 100; // Maximum number of files (total recording time in hours = (maxDuration x maxFileCount) / 3600)
 
 // long long currentTime = 0;
@@ -95,15 +91,23 @@ void generateCurrentFileName(char* fileName)
 
 bool getNextVideoFileName(char* fileName)
 {
-  char    nameBuffer[2000];
-  char    buffer[128];
-  int     index;
-  char*   temp;
-  String  nameStr;
-  int     fileCount = 0;
-
   // Generate file name in YYMMDD-HHMM format and return
   generateCurrentFileName(fileName);
+
+  return true;
+}
+
+void cleanupOldFiles(const String& mp4FileName)
+{
+  char    nameBuffer[2000];
+  char    buffer[128];
+  char*   temp;
+  String  nameStr;
+  String  currentFile;
+  int     fileCount = 0;
+
+  sprintf(buffer, "%s%s.mp4", fileSystem.getRootPath(), mp4FileName.c_str());
+  currentFile = buffer;
 
   fileSystem.readDir(fileSystem.getRootPath(), nameBuffer, sizeof(nameBuffer));
 
@@ -120,14 +124,13 @@ bool getNextVideoFileName(char* fileName)
 
   printf("Found %d mp4 files\n", fileCount);
 
-  if (fileCount < maxFileCount)
+  if (fileCount <= maxFileCount)
   {
     // Just return because we don't have to remove the oldest file...
-    return 1;
+    return;
   }
 
   // Find the oldest file and delete it
-
   uint16_t  second, minute, hour, day, month, year;  
   uint64_t  oldestFileTime = INT64_MAX;
   uint64_t  fileModTime;
@@ -136,6 +139,11 @@ bool getNextVideoFileName(char* fileName)
   for (temp = nameBuffer; strlen(temp) > 0; temp += strlen(temp) + 1)
   {
     sprintf(buffer, "%s%s", fileSystem.getRootPath(), temp);
+
+    if (currentFile == buffer)
+    {
+      continue;
+    }
     
     fileSystem.getLastModTime(buffer, &year, &month, &day, &hour, &minute, &second);
 
@@ -144,7 +152,7 @@ bool getNextVideoFileName(char* fileName)
     if (fileModTime < oldestFileTime)
     {
       oldestFileTime = fileModTime;
-      oldestFileName = temp;
+      oldestFileName = buffer;
     }
   }
 
@@ -155,19 +163,13 @@ bool getNextVideoFileName(char* fileName)
     printf("Removing oldest file \n");
 
     fileSystem.remove(oldestFileName);
-
-    printf("Returning %s as new video file name \n", fileName);
-
-    return true;
   }
-
-  Serial.println("Failed to find Video File Name");
-  return false;
 }
 
 void loop()
 {
-  static uint8_t   setModified = 0;
+  static bool   setModified = false;
+  static bool   cleanupRequired = false;
   static uint64_t  videoStartTime;
   static uint16_t  minutes = 0;
   uint16_t         temp;
@@ -182,10 +184,9 @@ void loop()
   // Check if a video is currently being recorded.
   if (mp4.getRecordingState() == false)
   {
-    oldFileName = mp4.getRecordingFileName();
-    setModified = 1;
-        
-    if (getNextVideoFileName(&fileName[0]))
+    oldFileName = mp4.getRecordingFileName().c_str();
+
+    if (getNextVideoFileName(fileName))
     {
       Serial.print("Starting recording video file: ");
       Serial.println(fileName);
@@ -193,21 +194,32 @@ void loop()
       mp4.setRecordingFileName(fileName);
       mp4.begin();
 
+      setTimeStamp(oldFileName.c_str());    
+
       videoStartTime = seconds;
       minutes = 0;
+      setModified = true;
+      cleanupRequired = true;
     }    
   }
   else
   {
-      // Wait a few seconds before setting the time stamp on the old video
-      if (setModified && ((seconds - videoStartTime) > 5) )
-      {
-        setTimeStamp(oldFileName.c_str());
-        setModified = 0;        
-      }
-      
       temp = (seconds - videoStartTime) / 60;
 
+      if (setModified && (seconds - videoStartTime) > 5)
+      {
+        printf("Setting time stamp for %s\n", oldFileName.c_str());
+        setTimeStamp(oldFileName.c_str());
+        setModified = false;
+      }
+
+      if (cleanupRequired && (seconds - videoStartTime) > 10)
+      {
+        printf("Cleaning up old files\n");
+        cleanupOldFiles(mp4.getRecordingFileName());
+        cleanupRequired = false;
+      }
+      
       if (temp >= 1 && temp > minutes)
       {
         minutes = temp;

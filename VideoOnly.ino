@@ -1,17 +1,15 @@
+#include <AmebaFatFS.h>
+#include <inttypes.h>
+#include <MP4Recording.h>
+#include <rtc.h>
 #include <SPI.h>
 #include <stdio.h>
+#include <StreamIO.h>
 #include <time.h>
-#include "rtc.h"
-#include "Wire.h"
-#include "inttypes.h"
+#include <VideoStream.h>
+#include <Wire.h>
 
-#include "AmebaFatFS.h"
-#include "StreamIO.h"
-#include "VideoStream.h"
-#include "MP4Recording.h"
-
-bool getNextVideoFileName(char* fileName);
-void loop();
+#include  "VideoOnly.h"
 
 #define CHANNEL 0
 #define USE_H264  1
@@ -30,19 +28,7 @@ MP4Recording mp4;
 StreamIO videoStreamer(1, 1);    // 1 Input Video -> 1 Output RTSP
 AmebaFatFS  fileSystem;
 
-#define DS3231_I2C_ADDRESS 0x68
-
-const uint32_t  maxDuration =  120; // Maximum duration of a recording file
-const int       maxFileCount = 100; // Maximum number of files (total recording time in hours = (maxDuration x maxFileCount) / 3600)
-
-// long long currentTime = 0;
 uint64_t seconds;
-
-// Convert binary coded decimal to normal decimal numbers
-byte bcdToDec(byte val)
-{
-  return( (val/16*10) + (val%16) );
-}
 
 void setup()
 {
@@ -50,10 +36,10 @@ void setup()
     Serial.begin(115200);    
     rtc.Init();
     Wire.begin();
-    
-    fileSystem.begin();
 
-    setRTCTime();
+    setRTCTime();    
+
+    fileSystem.begin();
 
     // Configure camera video channel with video format information
     Camera.configVideoChannel(CHANNEL, config);
@@ -80,6 +66,72 @@ void setup()
     pinMode(LED_G, OUTPUT);    
 }
 
+void loop()
+{
+  static bool   setModified = false;
+  static bool   cleanupRequired = false;
+  static uint64_t  videoStartTime;
+  static uint16_t  minutes = 0;
+  uint16_t         temp;
+  static String    oldFileName;
+  char fileName[128]; // Maximum file name lenght allowed by file system
+  static TimeStamp   timeStamp;
+
+  seconds = rtc.Read();
+
+  digitalWrite(LED_G, (seconds & 0x01));
+
+  // Check if a video is currently being recorded.
+  if (mp4.getRecordingState() == false)
+  {
+    oldFileName = mp4.getRecordingFileName().c_str();
+
+    if (getNextVideoFileName(fileName))
+    {
+      Serial.print("Starting recording video file: ");
+      Serial.println(fileName);
+      
+      mp4.setRecordingFileName(fileName);
+      mp4.begin();
+
+      setTimeStamp(oldFileName.c_str());    
+
+      videoStartTime = seconds;
+      minutes = 0;
+      setModified = true;
+      cleanupRequired = true;
+    }    
+  }
+  else
+  {
+      temp = (seconds - videoStartTime);
+
+      if (setModified &&  temp >= 5)
+      {
+        printf("Setting time stamp for %s\n", oldFileName.c_str());
+        setTimeStamp(oldFileName.c_str());
+        setModified = false;
+      }
+
+      if (cleanupRequired && (seconds - videoStartTime) > 10)
+      {
+        printf("Cleaning up old files\n");
+        cleanupOldFiles(mp4.getRecordingFileName());
+        cleanupRequired = false;
+      }
+      
+      temp /= 60;
+
+      if (temp >= 1 && temp > minutes)
+      {
+        minutes = temp;
+        Serial.print("Recording length = ");
+        Serial.print(minutes, DEC);
+        Serial.println(" minutes.");
+      }
+  }
+}
+
 void generateCurrentFileName(char* fileName)
 {
   byte second, minute, hour, dayOfWeek, dayOfMonth, month, year;
@@ -97,6 +149,8 @@ bool getNextVideoFileName(char* fileName)
   return true;
 }
 
+// Note, this Function works if we are starting from < the max allowed, and
+// checking each time a new file is created.  
 void cleanupOldFiles(const String& mp4FileName)
 {
   char    nameBuffer[2000];
@@ -111,6 +165,7 @@ void cleanupOldFiles(const String& mp4FileName)
 
   fileSystem.readDir(fileSystem.getRootPath(), nameBuffer, sizeof(nameBuffer));
 
+  // First, determine how many .mp4 files there are.
   for (temp = nameBuffer; strlen(temp) > 0; temp += strlen(temp) + 1)
   {
     nameStr = temp;
@@ -124,6 +179,7 @@ void cleanupOldFiles(const String& mp4FileName)
 
   printf("Found %d mp4 files\n", fileCount);
 
+  // Return if there are less than the maximum allowed.
   if (fileCount <= maxFileCount)
   {
     // Just return because we don't have to remove the oldest file...
@@ -163,70 +219,6 @@ void cleanupOldFiles(const String& mp4FileName)
     printf("Removing oldest file \n");
 
     fileSystem.remove(oldestFileName);
-  }
-}
-
-void loop()
-{
-  static bool   setModified = false;
-  static bool   cleanupRequired = false;
-  static uint64_t  videoStartTime;
-  static uint16_t  minutes = 0;
-  uint16_t         temp;
-  static String    oldFileName;
-  char fileName[128]; // Maximum file name lenght allowed by file system
-  uint16_t year, month, date, hour, minute, second;
-
-  seconds = rtc.Read();
-
-  digitalWrite(LED_G, (seconds & 0x01));
-
-  // Check if a video is currently being recorded.
-  if (mp4.getRecordingState() == false)
-  {
-    oldFileName = mp4.getRecordingFileName().c_str();
-
-    if (getNextVideoFileName(fileName))
-    {
-      Serial.print("Starting recording video file: ");
-      Serial.println(fileName);
-      
-      mp4.setRecordingFileName(fileName);
-      mp4.begin();
-
-      setTimeStamp(oldFileName.c_str());    
-
-      videoStartTime = seconds;
-      minutes = 0;
-      setModified = true;
-      cleanupRequired = true;
-    }    
-  }
-  else
-  {
-      temp = (seconds - videoStartTime) / 60;
-
-      if (setModified && (seconds - videoStartTime) > 5)
-      {
-        printf("Setting time stamp for %s\n", oldFileName.c_str());
-        setTimeStamp(oldFileName.c_str());
-        setModified = false;
-      }
-
-      if (cleanupRequired && (seconds - videoStartTime) > 10)
-      {
-        printf("Cleaning up old files\n");
-        cleanupOldFiles(mp4.getRecordingFileName());
-        cleanupRequired = false;
-      }
-      
-      if (temp >= 1 && temp > minutes)
-      {
-        minutes = temp;
-        Serial.print("Recording length = ");
-        Serial.print(minutes, DEC);
-        Serial.println(" minutes.");
-      }
   }
 }
 
@@ -301,6 +293,11 @@ void readDS3231time(byte *second,
   *year = bcdToDec(Wire.read());
 }
 
+// Convert binary coded decimal to normal decimal numbers
+byte bcdToDec(byte val)
+{
+  return( (val/16*10) + (val%16) );
+}
 
 void printInfo(void)
 {

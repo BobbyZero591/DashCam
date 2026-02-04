@@ -68,13 +68,13 @@ void setup()
 
 void loop()
 {
+  uint16_t temp;
+  char     fileName[128]; // Maximum file name lenght allowed by file system
   static bool   setModified = false;
   static bool   cleanupRequired = false;
-  static uint64_t  videoStartTime;
-  static uint16_t  minutes = 0;
-  uint16_t         temp;
-  static String    oldFileName;
-  char fileName[128]; // Maximum file name lenght allowed by file system
+  static uint64_t videoStartTime;
+  static uint16_t minutes = 0;
+  static String   oldFileName;
   static TimeStamp   timeStamp;
 
   seconds = rtc.Read();
@@ -94,7 +94,7 @@ void loop()
       mp4.setRecordingFileName(fileName);
       mp4.begin();
 
-      setTimeStamp(oldFileName.c_str());    
+      getCurrentTimestamp(timeStamp);
 
       videoStartTime = seconds;
       minutes = 0;
@@ -109,7 +109,7 @@ void loop()
       if (setModified &&  temp >= 5)
       {
         printf("Setting time stamp for %s\n", oldFileName.c_str());
-        setTimeStamp(oldFileName.c_str());
+        setFileTimeStamp(oldFileName.c_str(), timeStamp);
         setModified = false;
       }
 
@@ -120,6 +120,7 @@ void loop()
         cleanupRequired = false;
       }
       
+      // Convert seconds to minutes.
       temp /= 60;
 
       if (temp >= 1 && temp > minutes)
@@ -132,19 +133,27 @@ void loop()
   }
 }
 
-void generateCurrentFileName(char* fileName)
+void getCurrentTimestamp(TimeStamp& timeStamp)
 {
   byte second, minute, hour, dayOfWeek, dayOfMonth, month, year;
 
   readDS3231time(&second, &minute, &hour, &dayOfWeek, &dayOfMonth, &month, &year);
 
-  sprintf(fileName, "%02d%02d%02d-%02d%02d%02d", year, month, dayOfMonth, hour, minute, second);
+  timeStamp.second = second;
+  timeStamp.minute = minute;
+  timeStamp.hour = hour;
+  timeStamp.date = dayOfMonth;
+  timeStamp.month = month;
+  timeStamp.year = year;
 }
 
 bool getNextVideoFileName(char* fileName)
 {
-  // Generate file name in YYMMDD-HHMM format and return
-  generateCurrentFileName(fileName);
+  TimeStamp currTime;
+
+  getCurrentTimestamp(currTime);
+
+  sprintf(fileName, "%02d%02d%02d-%02d%02d%02d", currTime.year, currTime.month, currTime.date, currTime.hour, currTime.minute, currTime.second);
 
   return true;
 }
@@ -222,10 +231,9 @@ void cleanupOldFiles(const String& mp4FileName)
   }
 }
 
-void setTimeStamp(const char* fileName)
+void setFileTimeStamp(const char* fileName, TimeStamp& timeStamp)
 {
-  char fullFileName[127];
-  byte second, minute, hour, dayOfWeek, dayOfMonth, month, year;
+  char fullFileName[128];
   int   result;
   
   if (*fileName != 0)
@@ -237,12 +245,9 @@ void setTimeStamp(const char* fileName)
       Serial.print("Setting timestamp on file: ");
       Serial.println(fullFileName);
   
-      // retrieve data from DS3231
-      readDS3231time(&second, &minute, &hour, &dayOfWeek, &dayOfMonth, &month, &year);
-  
-      printf("Time stamp:  %04d/%02d/%02d, %02d:%02d:%02d \n", year+2000, month, dayOfMonth, hour, minute, second);
+      printf("Time stamp:  %04d/%02d/%02d, %02d:%02d:%02d \n", timeStamp.year+2000, timeStamp.month, timeStamp.date, timeStamp.hour, timeStamp.minute, timeStamp.second);
       
-      result = fileSystem.setLastModTime(fullFileName, (uint16_t)year + 2000, month, dayOfMonth, hour, minute, second);
+      result = fileSystem.setLastModTime(fullFileName, timeStamp.year+2000, timeStamp.month, timeStamp.date, timeStamp.hour, timeStamp.minute, timeStamp.second);
   
       if ( result !=  0)
       {

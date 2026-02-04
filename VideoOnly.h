@@ -30,7 +30,7 @@ void readDS3231time(byte *second,
 
 //-------------------------------------------------------//
 // Data structures
-typedef struct S_TimeStamp
+typedef struct
 {
       uint16_t year;
       uint16_t month;
